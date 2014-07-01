@@ -35,9 +35,8 @@ def inmates_in_jail(at_date, inmates):
 def record_at(date, history, key):
     if len(history) == 0:
         return None
-    elif len(history) == 1:
-        return history[0]
     else:
+        
         records_sorted = history.exclude(**{'%s__gt' % key: date}).order_by(key)
         return None if len(records_sorted) == 0 else records_sorted[0]
 
