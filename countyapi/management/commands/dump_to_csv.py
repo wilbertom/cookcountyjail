@@ -3,7 +3,9 @@ from countyapi.models import CountyInmate
 from scraper.inmate_details import InmateDetails
 from scraper.raw_inmate_data import RawInmateData
 from datetime import date, timedelta
+from functools import partial
 import os
+import csv
 from time import clock
 
 # August 17th, 2013
@@ -12,74 +14,32 @@ from time import clock
 EARLIEST_DATA_DAY = date(2013, 8, 17)
 ONE_DAY = timedelta(1)
 TODAY = date.today()
-YESTERDAY = TODAY - ONE_DAY
 
+"""
+export CCJ_RAW_INMATE_DATA_RELEASE_DIR=~/Data/ccjexport
+export CCJ_RAW_INMATE_DATA_BUILD_DIR=~/Data/ccjexport/build
+"""
 
-def inmates_in_jail(at_date, inmates):
-    """
-    Returns the inmates who where in jail
-    at the date
-    :param at_date:
-    :param inmates:
-    :return:
-    """
-    # remove all the inmates who have not being booked yet
-    # then remove the ones who were discharged before the date
-    return inmates.exclude(
-        booking_date__gt=at_date
-    ).exclude(
-        discharge_date_latest__lt=at_date
-    )
-
-
-def record_at(date, history, key):
-    if len(history) == 0:
-        return None
-    else:
-        
-        records_sorted = history.exclude(**{'%s__gt' % key: date}).order_by(key)
-        return None if len(records_sorted) == 0 else records_sorted[0]
+features = {'CCJ_STORE_RAW_INMATE_DATA': True,
+            'CCJ_RAW_INMATE_DATA_RELEASE_DIR': os.environ['CCJ_RAW_INMATE_DATA_RELEASE_DIR'],
+            'CCJ_RAW_INMATE_DATA_BUILD_DIR': os.environ['CCJ_RAW_INMATE_DATA_BUILD_DIR']}
 
 
 class FlattenedInmateDetails(InmateDetails):
-
-    def __init__(self, state_at_date, inmate_record):
-        self.state_at_date = state_at_date
+    def __init__(self, inmate_record):
         self.record = inmate_record
 
-        self._court_location = None
-        self._court_date = None
-        self._housing_location = None
-        self._charges = None
+    def next_court_date(self):
+        return None
 
-        self.flatten(inmate_record)
+    def charges(self):
+        return None
 
-    def record_at(self, history, k):
-        return record_at(self.state_at_date, history.all(), k)
+    def court_house_location(self):
+        return None
 
-    def flat_housing_location(self, record):
-        _housing_location = self.record_at(record.housing_history, 'housing_date_discovered')
-        return None if _housing_location is None else _housing_location.housing_location.\
-            housing_location
-
-    def flat_charges(self, record):
-        _charges = self.record_at(record.charges_history, 'date_seen')
-        return None if _charges is None else _charges.charges
-
-    def flat_court(self, record):
-        return self.record_at(record.court_dates, 'date')
-
-    def flatten(self, record):
-        _court = self.flat_court(record)
-        if _court is not None:
-            # TODO: remove to go faster, here becuase of record 2013-0817010
-            self._court_location = _court.location.location.encode('utf-8')
-            self._court_date = _court.date
-
-        self._housing_location = self.flat_housing_location(record)
-        self._charges = self.flat_charges(record)
-
-        return self
+    def housing_location(self):
+        return None
 
     def age_at_booking(self):
         return self.record.age_at_booking
@@ -93,26 +53,14 @@ class FlattenedInmateDetails(InmateDetails):
     def booking_date(self):
         return self.record.booking_date
 
-    def charges(self):
-        return self._charges
-
-    def court_house_location(self):
-        return self._court_location
-
     def gender(self):
         return self.record.gender
 
     def height(self):
         return self.record.height
 
-    def housing_location(self):
-        return self._housing_location
-
     def jail_id(self):
         return self.record.jail_id
-
-    def next_court_date(self):
-        return self._court_date
 
     def race(self):
         return self.record.race
@@ -121,23 +69,106 @@ class FlattenedInmateDetails(InmateDetails):
         return self.record.weight
 
 
+class InmateDetailsState(FlattenedInmateDetails):
+    
+    def __init__(self, inmate_record, at_date):
+        super(InmateDetailsState, self).__init__(inmate_record)
+        self.state_date = at_date
+
+    def next_court_date(self):
+        return None
+
+    def charges(self):
+        return None
+
+    def court_house_location(self):
+        return None
+
+    def housing_location(self):
+        return None
+
+
+def at(date, history):
+    records = history.filter(date__range=(date, TODAY)).order_by('date')
+    if len(records) == 0:
+        return None
+    else:
+        return records[0]
+
+
+
 class Command(BaseCommand):
 
+    def each_day(self, f):
+
+        inmates = self.all_inmates
+
+        i_date = EARLIEST_DATA_DAY
+
+        while i_date < TODAY:
+            inmates = inmates.exclude(discharge_date_latest__lte=i_date)
+            f(i_date, inmates.exclude(booking_date__gt=i_date))
+
+            i_date += ONE_DAY
+
+    def first_pass(self):
+        """
+        First pass, about 8 seconds * number of days.
+
+        """
+
+        def write_flat_records(current_date, inmates_at_date):
+            print('Processing %s - %d' % (current_date, clock()))
+            # permanently remove all the inmates that have been discharged
+
+            data_writer = RawInmateData(current_date, features, None)
+
+            for inmate in inmates_at_date:
+                data_writer.add(FlattenedInmateDetails(inmate))
+
+        self.each_day(write_flat_records)
+
+        return self
+
+    def second_pass(self):
+        """
+        Rewriting the data into the new file takes around one second. The
+        issue is in loading the relational data.
+
+        1 second * number of files
+
+        """
+
+        data_dir = partial(os.path.join, os.environ['CCJ_RAW_INMATE_DATA_BUILD_DIR'])
+
+        def add_inmates_relations(current_date, inmates_at_date):
+            print('Processing %s - %d' % (current_date, clock()))
+            file_path = data_dir(current_date.strftime('%Y-%m-%d'))
+            i = csv.DictReader(open("%s.csv" % (file_path), 'r'))
+            o = csv.DictWriter(open("%s-%s.csv" % (file_path, 'with-relations'), 'w'), i.fieldnames)
+            o.writeheader()
+
+            for row, inmate in zip(i, inmates_at_date):
+                # TODO: this is all a lie
+                court_date = at(current_date, inmate.court_dates)
+                if court_date:
+                    row['Court_Date'] = court_date.date
+                    row['Court_Location'] = court_date.location.location.encode('utf-8')
+
+                o.writerow(row)
+
+        self.each_day(add_inmates_relations)
+
+        return self
+
+    def query_inmates(self):
+        self.all_inmates = CountyInmate.objects.filter(booking_date__gte=EARLIEST_DATA_DAY)
+        return self
+
     def handle(self, *args, **options):
-        all_inmates = CountyInmate.objects.filter(booking_date__gte=EARLIEST_DATA_DAY)
+        self.query_inmates()
+        # self.first_pass()
 
-        f = {'CCJ_STORE_RAW_INMATE_DATA': True,
-             'CCJ_RAW_INMATE_DATA_RELEASE_DIR': os.environ['CCJ_RAW_INMATE_DATA_RELEASE_DIR'],
-             'CCJ_RAW_INMATE_DATA_BUILD_DIR': os.environ['CCJ_RAW_INMATE_DATA_BUILD_DIR']}
+        self.all_inmates.prefetch_related('court_dates')
+        self.second_pass()
 
-        current_date = EARLIEST_DATA_DAY
-
-        while current_date <= YESTERDAY:
-            print ('**************** On Date: %s - %d ****************' % (current_date, clock()))
-            inmates_for_date = inmates_in_jail(current_date, all_inmates)
-            data_writer = RawInmateData(current_date, f, None)
-
-            for i in inmates_for_date:
-                data_writer.add(FlattenedInmateDetails(current_date, i))
-
-            current_date += ONE_DAY
