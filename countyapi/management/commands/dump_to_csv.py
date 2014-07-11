@@ -116,7 +116,7 @@ data_dir = partial(os.path.join, os.environ['CCJ_RAW_INMATE_DATA_BUILD_DIR'])
 
 
 def dump(date, all_inmates):
-    inmates = all_inmates.exclude(booking_date__gt=date).exclude(discharge_date_latest__lt=date)
+    inmates = all_inmates.exclude(booking_date__gt=date)
     data_writer = RawInmateData(date, features, None)
 
     for inmate in inmates:
@@ -135,5 +135,7 @@ class Command(BaseCommand):
         print("Date, Inmate Count, Clock")
         i = EARLIEST_DATA_DAY
         while i < TODAY:
+            inmates = inmates.exclude(discharge_date_latest__lt=i)
             dump(i, inmates)
+
             i += ONE_DAY

@@ -56,7 +56,7 @@ else:
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': os.path.join(SITE_DIR, 'ccj')
+            'NAME': os.path.join(SITE_DIR, 'ccj/ccjdb')
         }
     }
 
